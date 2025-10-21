@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dreamifly-2API 高级测试面板</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="header">
+                <h2>Dreamifly-2API</h2>
+                <p>v1.0 - 高级测试面板</p>
+            </div>
+
+            <div class="form-group">
+                <label for="api-key">API Key</label>
+                <input type="password" id="api-key" placeholder="请输入您的 API Key" value="1">
+            </div>
+
+            <div class="form-group">
+                <label for="model-select">模型 (Model)</label>
+                <select id="model-select"></select>
+            </div>
+
+            <div class="form-group">
+                <label for="style-select">风格 (Style)</label>
+                <select id="style-select"></select>
+            </div>
+
+            <div class="form-group">
+                <label>参考图 (可选)</label>
+                <div id="image-preview-container" class="image-drop-zone">
+                    <img id="image-preview" src="#" alt="图片预览" class="hidden">
+                    <span id="upload-placeholder">点击或拖拽图片到此处</span>
+                    <button id="clear-image-btn" class="hidden">&times;</button>
+                </div>
+                <input type="file" id="image-upload" accept="image/*" class="hidden">
+            </div>
+
+            <div class="form-group">
+                <label for="prompt-input">提示词 (Prompt)</label>
+                <textarea id="prompt-input" rows="6" placeholder="输入您的图像描述..."></textarea>
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="width-slider">宽度 (Width)</label>
+                    <span id="width-value">1024px</span>
+                </div>
+                <input type="range" id="width-slider" min="256" max="2048" step="8" value="1024">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="height-slider">高度 (Height)</label>
+                    <span id="height-value">1024px</span>
+                </div>
+                <input type="range" id="height-slider" min="256" max="2048" step="8" value="1024">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="steps-slider">步数 (Steps)</label>
+                    <span id="steps-value">20</span>
+                </div>
+                <input type="range" id="steps-slider" min="10" max="32" step="1" value="20">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="count-slider">生成数量 (Count)</label>
+                    <span id="count-value">1</span>
+                </div>
+                <input type="range" id="count-slider" min="1" max="8" step="1" value="1">
+            </div>
+
+            <button id="generate-btn">
+                <span>生成图像</span>
+            </button>
+        </div>
+        <div class="main-content">
+            <div id="result-panel">
+                <div id="placeholder" class="placeholder">
+                    <p>请在左侧配置参数并开始生成</p>
+                </div>
+                <div id="spinner" class="spinner hidden"></div>
+                <div id="error-message" class="error hidden"></div>
+                <div id="image-grid"></div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/script.js"></script>
+</body>
+</html>
