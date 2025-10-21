@@ -1,0 +1,1015 @@
+项目 'dreamifly-2api' 的结构树:
+📂 dreamifly-2api/
+    📄 .env
+    📄 .env.example
+    📄 Dockerfile
+    📄 docker-compose.yml
+    📄 main.py
+    📄 nginx.conf
+    📄 requirements.txt
+    📂 app/
+        📂 core/
+            📄 __init__.py
+            📄 config.py
+        📂 providers/
+            📄 __init__.py
+            📄 base_provider.py
+            📄 dreamifly_provider.py
+        📂 utils/
+            📄 sse_utils.py
+    📂 static/
+        📄 index.html
+        📄 script.js
+        📄 style.css
+================================================================================
+
+--- 文件路径: .env ---
+
+# [自动填充] dreamifly-2api 生产环境配置
+# 该文件由 Genesis Protocol · Ω (Omega) 版自动生成。
+
+# --- 安全配置 ---
+# 用于保护您的 API 服务的访问密钥，请按需修改为您自己的复杂密钥。
+API_MASTER_KEY=1
+
+# --- 端口配置 ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8088
+
+# --- Dreamifly.com 凭证 ---
+# 已从您提供的抓包数据中自动提取。
+DREAMIFLY_AUTH_TOKEN="Bearer 251016"
+
+
+
+--- 文件路径: .env.example ---
+
+# ====================================================================
+# dreamifly-2api 配置文件模板
+# ====================================================================
+#
+# 请将此文件重命名为 ".env" 并填入您的凭证。
+#
+
+# --- 核心安全配置 (必须设置) ---
+# 用于保护您 API 服务的访问密钥。
+API_MASTER_KEY=sk-dreamifly-2api-default-key-please-change-me
+
+# --- 部署配置 (可选) ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8088
+
+# --- Dreamifly.com 凭证 (必须设置) ---
+# 请从浏览器开发者工具中获取。
+DREAMIFLY_AUTH_TOKEN="Bearer 251016"
+
+
+
+--- 文件路径: Dockerfile ---
+
+# /Dockerfile
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN useradd --create-home appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+
+--- 文件路径: docker-compose.yml ---
+
+# /docker-compose.yml
+services:
+  nginx:
+    image: nginx:latest
+    container_name: dreamifly-2api-nginx
+    restart: always
+    ports:
+      - "${NGINX_PORT:-8088}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - dreamifly-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dreamifly-2api-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - dreamifly-net
+
+networks:
+  dreamifly-net:
+    driver: bridge
+
+
+--- 文件路径: main.py ---
+
+import logging
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, File, UploadFile, Form
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.core.config import settings
+from app.providers.dreamifly_provider import DreamiflyProvider
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+provider = DreamiflyProvider()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info(f"应用启动中... {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"服务将在 http://localhost:{settings.NGINX_PORT} 上可用")
+    logger.info(f"Web UI 测试界面已启用，请访问 http://localhost:{settings.NGINX_PORT}/")
+    yield
+    logger.info("应用关闭。")
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=settings.DESCRIPTION,
+    lifespan=lifespan
+)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    if settings.API_MASTER_KEY and settings.API_MASTER_KEY != "1":
+        if not authorization or "bearer" not in authorization.lower():
+            raise HTTPException(status_code=401, detail="需要 Bearer Token 认证。")
+        token = authorization.split(" ")[-1]
+        if token != settings.API_MASTER_KEY:
+            raise HTTPException(status_code=403, detail="无效的 API Key。")
+
+@app.post("/v1/images/generations", dependencies=[Depends(verify_api_key)])
+async def image_generations(request: Request):
+    """处理文生图请求"""
+    try:
+        request_data = await request.json()
+        return await provider.generate_image(request_data)
+    except Exception as e:
+        logger.error(f"处理文生图请求时出错: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
+@app.post("/v1/images/edits", dependencies=[Depends(verify_api_key)])
+async def image_edits(
+    image: UploadFile = File(...),
+    prompt: str = Form(...),
+    model: Optional[str] = Form(None),
+    style: Optional[str] = Form("无"),
+    n: Optional[int] = Form(1),
+    size: Optional[str] = Form("1024x1024"),
+    steps: Optional[int] = Form(20)
+):
+    """处理图生图请求"""
+    try:
+        image_bytes = await image.read()
+        request_data = {
+            "prompt": prompt,
+            "model": model,
+            "style": style,
+            "n": n,
+            "size": size,
+            "steps": steps
+        }
+        return await provider.generate_image(request_data, image_bytes=image_bytes)
+    except Exception as e:
+        logger.error(f"处理图生图请求时出错: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
+@app.get("/v1/models", dependencies=[Depends(verify_api_key)])
+async def list_models():
+    return await provider.get_models()
+
+@app.get("/v1/styles", dependencies=[Depends(verify_api_key)])
+async def list_styles():
+    return JSONResponse(content={"data": list(settings.STYLE_MAPPING.keys())})
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def serve_ui():
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="UI 文件 (static/index.html) 未找到。")
+
+
+--- 文件路径: nginx.conf ---
+
+# /nginx.conf
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream dreamifly_backend {
+        # ip_hash is not strictly necessary for this stateless service,
+        # but it's a good practice for potential future stateful features.
+        ip_hash;
+        server app:8000;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # Allow larger request bodies for image uploads
+        client_max_body_size 50M;
+
+        location / {
+            proxy_pass http://dreamifly_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+        }
+    }
+}
+
+
+--- 文件路径: requirements.txt ---
+
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+cloudscraper
+python-multipart
+aiohttp
+
+
+--- 文件路径: app\core\__init__.py ---
+
+
+
+--- 文件路径: app\core\config.py ---
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional, List, Dict, Any
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        extra="ignore"
+    )
+
+    APP_NAME: str = "dreamifly-2api"
+    APP_VERSION: str = "1.0.0"
+    DESCRIPTION: str = "一个将 dreamifly.com 图像生成功能转换为兼容 OpenAI 格式 API 的高性能代理。"
+
+    API_MASTER_KEY: Optional[str] = None
+    DREAMIFLY_AUTH_TOKEN: Optional[str] = None
+
+    # --- 修改点 1: 延长请求超时时间 ---
+    # 将超时时间从 300 秒增加到 600 秒 (10 分钟)
+    API_REQUEST_TIMEOUT: int = 600
+
+    # --- 新增点: 上游 API 并发限制 ---
+    # 根据您的反馈，设置为 2
+    UPSTREAM_CONCURRENCY_LIMIT: int = 2
+
+    NGINX_PORT: int = 8088
+
+    # 模型配置
+    # 定义了所有可用的模型及其对应的上游名称
+    MODEL_MAPPING: Dict[str, str] = {
+        "dreamifly-qwen-image": "Qwen-Image",
+        "dreamifly-qwen-edit": "Qwen-Image-Edit",
+        "dreamifly-flux-dev": "Flux-Dev",
+        "dreamifly-flux-krea": "Flux-Krea",
+        "dreamifly-flux-kontext": "Flux-Kontext",
+        "dreamifly-sdxl": "Wai-SDXL-V150",
+    }
+    DEFAULT_MODEL: str = "dreamifly-qwen-image"
+
+    # 风格配置
+    # 定义了所有可用的风格及其对应的提示词前缀
+    STYLE_MAPPING: Dict[str, str] = {
+        "无": "",
+        "卡通": "cartoon style, ",
+        "动漫": "anime style, ",
+        "油画": "oil painting style, ",
+        "线稿": "line art style, ",
+        "矢量线条": "vector line style, ",
+        "街机像素": "pixel art style, ",
+        "乐高积木": "lego style, ",
+        "Riso噪点插画": "risograph style, ",
+        "现实风格": "realistic style, ",
+        "布偶风格": "puppet style, ",
+        "Emoji图标风格": "emoji icon style, ",
+    }
+
+settings = Settings()
+
+
+--- 文件路径: app\providers\__init__.py ---
+
+
+
+--- 文件路径: app\providers\base_provider.py ---
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+from fastapi.responses import JSONResponse
+
+class BaseProvider(ABC):
+    @abstractmethod
+    async def generate_image(self, request_data: Dict[str, Any], image_bytes: Optional[bytes] = None) -> JSONResponse:
+        pass
+
+    @abstractmethod
+    async def get_models(self) -> JSONResponse:
+        pass
+
+
+--- 文件路径: app\providers\dreamifly_provider.py ---
+
+import time
+import logging
+import random
+import asyncio
+import base64
+import json
+from typing import Dict, Any, Optional, Tuple
+
+import cloudscraper
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse
+
+from app.core.config import settings
+from app.providers.base_provider import BaseProvider
+
+logger = logging.getLogger(__name__)
+
+class DreamiflyProvider(BaseProvider):
+    BASE_URL = "https://dreamifly.com/api/generate"
+
+    def __init__(self):
+        # --- 修改点 2: 初始化并发控制器 (Semaphore) ---
+        # 使用在 config.py 中定义的值 (2)
+        self.semaphore = asyncio.Semaphore(settings.UPSTREAM_CONCURRENCY_LIMIT)
+        logger.info(f"并发控制器已初始化，最大并发数: {settings.UPSTREAM_CONCURRENCY_LIMIT}")
+
+    def _prepare_headers(self) -> Dict[str, str]:
+        if not settings.DREAMIFLY_AUTH_TOKEN:
+            raise ValueError("DREAMIFLY_AUTH_TOKEN 未在 .env 文件中配置。")
+        return {
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Authorization": settings.DREAMIFLY_AUTH_TOKEN,
+            "Content-Type": "application/json",
+            "Origin": "https://dreamifly.com",
+            "Referer": "https://dreamifly.com/zh",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        }
+
+    def _parse_size(self, size: Optional[str]) -> Tuple[int, int]:
+        if not size or 'x' not in size:
+            return 1024, 1024
+        try:
+            width, height = map(int, size.split('x'))
+            return width, height
+        except (ValueError, TypeError):
+            logger.warning(f"无效的 size 参数: '{size}', 使用默认值 1024x1024")
+            return 1024, 1024
+
+    async def _send_single_request(self, payload: Dict[str, Any], task_id: int) -> str:
+        # 保持每个请求创建独立 scraper 实例，确保线程安全
+        scraper = cloudscraper.create_scraper(
+            browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+        )
+        
+        loop = asyncio.get_running_loop()
+        headers = self._prepare_headers()
+        
+        logger.info(f"[任务 {task_id}] 正在向上游发送请求, Prompt: '{str(payload.get('prompt'))[:50]}...'")
+        
+        response = None
+        try:
+            response = await loop.run_in_executor(
+                None, 
+                lambda: scraper.post(
+                    self.BASE_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=settings.API_REQUEST_TIMEOUT
+                )
+            )
+            
+            logger.info(f"[任务 {task_id}] 收到上游响应状态码: {response.status_code}")
+            response.raise_for_status()
+            
+            content_type = response.headers.get("Content-Type", "")
+            
+            if "application/json" in content_type:
+                response_json = response.json()
+                image_url = response_json.get("imageUrl")
+                if not image_url or not image_url.startswith("data:image/png;base64,"):
+                    raise ValueError(f"上游 API 返回的 JSON 中未包含有效的 Base64 图像数据。")
+                logger.info(f"[任务 {task_id}] 成功获取图像数据。")
+                return image_url.split(',', 1)[1]
+            
+            else:
+                raise ValueError(f"上游返回了非预期的 Content-Type: {content_type}。可能是被 Cloudflare 拦截。")
+
+        except Exception as e:
+            error_message = f"[任务 {task_id}] 请求上游失败: {e}"
+            if response is not None:
+                error_message += f"\n上游响应内容 (Raw Text):\n---START---\n{response.text[:1000]}\n---END---"
+            logger.error(error_message, exc_info=True)
+            raise
+
+    async def generate_image(self, request_data: Dict[str, Any], image_bytes: Optional[bytes] = None) -> JSONResponse:
+        prompt = request_data.get("prompt")
+        if not prompt:
+            raise HTTPException(status_code=400, detail="参数 'prompt' 不能为空。")
+
+        user_model = request_data.get("model", settings.DEFAULT_MODEL)
+        actual_model = settings.MODEL_MAPPING.get(user_model)
+        if not actual_model:
+            raise HTTPException(status_code=400, detail=f"不支持的模型: '{user_model}'")
+
+        style_key = request_data.get("style", "无")
+        style_prefix = settings.STYLE_MAPPING.get(style_key, "")
+        final_prompt = f"{style_prefix}{prompt}"
+
+        width, height = self._parse_size(request_data.get("size"))
+        num_images = request_data.get("n", 1)
+        steps = request_data.get("steps", 20)
+
+        base_payload = {
+            "prompt": final_prompt,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "batch_size": 1,
+            "model": actual_model,
+        }
+
+        if image_bytes:
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            base_payload["images"] = [f"data:image/png;base64,{base64_image}"]
+            if "edit" not in actual_model.lower():
+                 logger.warning(f"正在使用参考图，但选择的模型 '{actual_model}' 可能不是一个编辑模型。")
+        else:
+            base_payload["images"] = []
+
+        # --- 修改点 3: 使用并发控制器包装任务 ---
+        async def controlled_task_runner(payload: Dict[str, Any], task_id: int):
+            """一个包装器，它会先获取信号量，再执行任务"""
+            async with self.semaphore:
+                logger.info(f"[任务 {task_id}] 获取到信号量，开始执行。")
+                result = await self._send_single_request(payload, task_id)
+                logger.info(f"[任务 {task_id}] 执行完毕，释放信号量。")
+                return result
+
+        tasks = []
+        for i in range(num_images):
+            payload = base_payload.copy()
+            payload["seed"] = random.randint(0, 100_000_000)
+            # 创建被并发控制器包装后的任务
+            tasks.append(controlled_task_runner(payload, task_id=i + 1))
+        
+        logger.info(f"已创建 {num_images} 个任务，准备通过并发控制器（上限 {settings.UPSTREAM_CONCURRENCY_LIMIT}）执行...")
+
+        try:
+            # asyncio.gather 会并发运行所有任务，但 semaphore 会确保同时进行的网络请求不超过限制
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            successful_results = []
+            exceptions = []
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    logger.error(f"[任务 {i + 1}] 最终执行失败: {res}")
+                    exceptions.append(f"任务 {i+1}: {res}")
+                else:
+                    successful_results.append({"b64_json": res})
+            
+            if not successful_results:
+                error_details = "; ".join(exceptions)
+                raise HTTPException(status_code=502, detail=f"所有上游图像生成任务均失败。错误详情: {error_details}")
+
+            return JSONResponse(content={
+                "created": int(time.time()),
+                "data": successful_results
+            })
+
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise e
+            logger.error(f"处理并发请求时发生严重错误: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail=f"上游服务错误或所有重试均失败: {str(e)}")
+
+    async def get_models(self) -> JSONResponse:
+        return JSONResponse(content={
+            "object": "list",
+            "data": [
+                {"id": name, "object": "model", "created": int(time.time()), "owned_by": "lzA6"}
+                for name in settings.MODEL_MAPPING.keys()
+            ]
+        })
+
+
+--- 文件路径: app\utils\sse_utils.py ---
+
+import json
+import time
+from typing import Dict, Any, Optional
+
+DONE_CHUNK = b"data: [DONE]\n\n"
+
+def create_sse_data(data: Dict[str, Any]) -> bytes:
+    """将字典数据格式化为 SSE 事件字符串。"""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode('utf-8')
+
+def create_chat_completion_chunk(
+    request_id: str,
+    model: str,
+    content: str,
+    finish_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    """创建一个与 OpenAI 兼容的聊天补全流式块。"""
+    return {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": finish_reason
+            }
+        ]
+    }
+
+
+--- 文件路径: static\index.html ---
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dreamifly-2API 高级测试面板</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="header">
+                <h2>Dreamifly-2API</h2>
+                <p>v1.0 - 高级测试面板</p>
+            </div>
+
+            <div class="form-group">
+                <label for="api-key">API Key</label>
+                <input type="password" id="api-key" placeholder="请输入您的 API Key" value="1">
+            </div>
+
+            <div class="form-group">
+                <label for="model-select">模型 (Model)</label>
+                <select id="model-select"></select>
+            </div>
+
+            <div class="form-group">
+                <label for="style-select">风格 (Style)</label>
+                <select id="style-select"></select>
+            </div>
+
+            <div class="form-group">
+                <label>参考图 (可选)</label>
+                <div id="image-preview-container" class="image-drop-zone">
+                    <img id="image-preview" src="#" alt="图片预览" class="hidden">
+                    <span id="upload-placeholder">点击或拖拽图片到此处</span>
+                    <button id="clear-image-btn" class="hidden">&times;</button>
+                </div>
+                <input type="file" id="image-upload" accept="image/*" class="hidden">
+            </div>
+
+            <div class="form-group">
+                <label for="prompt-input">提示词 (Prompt)</label>
+                <textarea id="prompt-input" rows="6" placeholder="输入您的图像描述..."></textarea>
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="width-slider">宽度 (Width)</label>
+                    <span id="width-value">1024px</span>
+                </div>
+                <input type="range" id="width-slider" min="256" max="2048" step="8" value="1024">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="height-slider">高度 (Height)</label>
+                    <span id="height-value">1024px</span>
+                </div>
+                <input type="range" id="height-slider" min="256" max="2048" step="8" value="1024">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="steps-slider">步数 (Steps)</label>
+                    <span id="steps-value">20</span>
+                </div>
+                <input type="range" id="steps-slider" min="10" max="32" step="1" value="20">
+            </div>
+
+            <div class="form-group slider-group">
+                <div class="slider-label">
+                    <label for="count-slider">生成数量 (Count)</label>
+                    <span id="count-value">1</span>
+                </div>
+                <input type="range" id="count-slider" min="1" max="8" step="1" value="1">
+            </div>
+
+            <button id="generate-btn">
+                <span>生成图像</span>
+            </button>
+        </div>
+        <div class="main-content">
+            <div id="result-panel">
+                <div id="placeholder" class="placeholder">
+                    <p>请在左侧配置参数并开始生成</p>
+                </div>
+                <div id="spinner" class="spinner hidden"></div>
+                <div id="error-message" class="error hidden"></div>
+                <div id="image-grid"></div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/script.js"></script>
+</body>
+</html>
+
+--- 文件路径: static\script.js ---
+
+document.addEventListener('DOMContentLoaded', () => {
+    // DOM Elements
+    const apiKeyInput = document.getElementById('api-key');
+    const modelSelect = document.getElementById('model-select');
+    const styleSelect = document.getElementById('style-select');
+    const imageUpload = document.getElementById('image-upload');
+    const imagePreviewContainer = document.getElementById('image-preview-container');
+    const imagePreview = document.getElementById('image-preview');
+    const uploadPlaceholder = document.getElementById('upload-placeholder');
+    const clearImageBtn = document.getElementById('clear-image-btn');
+    const promptInput = document.getElementById('prompt-input');
+    const generateBtn = document.getElementById('generate-btn');
+    
+    const widthSlider = document.getElementById('width-slider');
+    const widthValue = document.getElementById('width-value');
+    const heightSlider = document.getElementById('height-slider');
+    const heightValue = document.getElementById('height-value');
+    const stepsSlider = document.getElementById('steps-slider');
+    const stepsValue = document.getElementById('steps-value');
+    const countSlider = document.getElementById('count-slider');
+    const countValue = document.getElementById('count-value');
+
+    const imageGrid = document.getElementById('image-grid');
+    const spinner = document.getElementById('spinner');
+    const errorMessage = document.getElementById('error-message');
+    const placeholder = document.getElementById('placeholder');
+
+    let selectedFile = null;
+
+    // --- Core Functions ---
+
+    async function fetchAndPopulate(endpoint, selectElement, placeholderText) {
+        selectElement.innerHTML = `<option>${placeholderText}...</option>`;
+        selectElement.disabled = true;
+        
+        try {
+            const apiKey = apiKeyInput.value.trim();
+            if (!apiKey) throw new Error("API Key is missing.");
+
+            const response = await fetch(endpoint, { headers: { 'Authorization': `Bearer ${apiKey}` } });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.detail || `Failed to load data from ${endpoint}`);
+            
+            selectElement.innerHTML = '';
+            result.data.forEach(item => {
+                const option = document.createElement('option');
+                const value = typeof item === 'object' ? item.id : item;
+                option.value = value;
+                option.textContent = value;
+                selectElement.appendChild(option);
+            });
+            selectElement.disabled = false;
+            return true;
+        } catch (error) {
+            selectElement.innerHTML = `<option>加载失败</option>`;
+            showError(`加载失败: ${error.message}`);
+            return false;
+        }
+    }
+
+    async function loadInitialData() {
+        generateBtn.disabled = true;
+        const modelsLoaded = await fetchAndPopulate('/v1/models', modelSelect, '加载模型中');
+        const stylesLoaded = await fetchAndPopulate('/v1/styles', styleSelect, '加载风格中');
+        if (modelsLoaded && stylesLoaded) {
+            generateBtn.disabled = false;
+        }
+    }
+
+    function handleFile(file) {
+        if (!file) return;
+        selectedFile = file;
+        const reader = new FileReader();
+        reader.onload = e => {
+            imagePreview.src = e.target.result;
+            imagePreview.classList.remove('hidden');
+            uploadPlaceholder.classList.add('hidden');
+            clearImageBtn.classList.remove('hidden');
+        };
+        reader.readAsDataURL(file);
+    }
+
+    function clearImage() {
+        selectedFile = null;
+        imageUpload.value = '';
+        imagePreview.src = '#';
+        imagePreview.classList.add('hidden');
+        uploadPlaceholder.classList.remove('hidden');
+        clearImageBtn.classList.add('hidden');
+    }
+
+    async function handleGenerate() {
+        const apiKey = apiKeyInput.value.trim();
+        const prompt = promptInput.value.trim();
+        if (!apiKey || !prompt) {
+            showError("请确保 API Key 和提示词都已填写。");
+            return;
+        }
+
+        setLoading(true);
+
+        try {
+            let response;
+            if (selectedFile) {
+                // 图生图
+                const formData = new FormData();
+                formData.append('image', selectedFile);
+                formData.append('prompt', prompt);
+                formData.append('model', modelSelect.value);
+                formData.append('style', styleSelect.value);
+                formData.append('n', countSlider.value);
+                formData.append('size', `${widthSlider.value}x${heightSlider.value}`);
+                formData.append('steps', stepsSlider.value);
+                
+                response = await fetch('/v1/images/edits', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${apiKey}` },
+                    body: formData
+                });
+            } else {
+                // 文生图
+                const payload = {
+                    prompt: prompt,
+                    model: modelSelect.value,
+                    style: styleSelect.value,
+                    n: parseInt(countSlider.value, 10),
+                    size: `${widthSlider.value}x${heightSlider.value}`,
+                    steps: parseInt(stepsSlider.value, 10),
+                    response_format: "b64_json"
+                };
+                response = await fetch('/v1/images/generations', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify(payload)
+                });
+            }
+
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.detail || '生成失败，未知错误。');
+
+            if (result.data && result.data.length > 0) {
+                displayImages(result.data);
+            } else {
+                throw new Error('API 返回了成功状态，但没有图片数据。');
+            }
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    function displayImages(data) {
+        imageGrid.innerHTML = '';
+        data.forEach(item => {
+            if (item.b64_json) {
+                const imgContainer = document.createElement('div');
+                imgContainer.className = 'image-container';
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${item.b64_json}`;
+                img.alt = 'Generated Image';
+                imgContainer.appendChild(img);
+                imageGrid.appendChild(imgContainer);
+            }
+        });
+    }
+
+    function setLoading(isLoading) {
+        generateBtn.disabled = isLoading;
+        spinner.classList.toggle('hidden', !isLoading);
+        placeholder.classList.toggle('hidden', isLoading || imageGrid.children.length > 0);
+        if (isLoading) {
+            imageGrid.innerHTML = '';
+            hideError();
+        }
+    }
+
+    function showError(message) {
+        errorMessage.textContent = message;
+        errorMessage.classList.remove('hidden');
+        placeholder.classList.add('hidden');
+    }
+
+    function hideError() {
+        errorMessage.classList.add('hidden');
+    }
+
+    // --- Event Listeners ---
+    apiKeyInput.addEventListener('change', loadInitialData);
+    imagePreviewContainer.addEventListener('click', () => imageUpload.click());
+    imagePreviewContainer.addEventListener('dragover', e => e.preventDefault());
+    imagePreviewContainer.addEventListener('drop', e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); });
+    imageUpload.addEventListener('change', e => handleFile(e.target.files[0]));
+    clearImageBtn.addEventListener('click', (e) => { e.stopPropagation(); clearImage(); });
+    
+    widthSlider.addEventListener('input', () => widthValue.textContent = `${widthSlider.value}px`);
+    heightSlider.addEventListener('input', () => heightValue.textContent = `${heightSlider.value}px`);
+    stepsSlider.addEventListener('input', () => stepsValue.textContent = stepsSlider.value);
+    countSlider.addEventListener('input', () => countValue.textContent = countSlider.value);
+
+    generateBtn.addEventListener('click', handleGenerate);
+
+    // --- Initial Load ---
+    loadInitialData();
+});
+
+
+--- 文件路径: static\style.css ---
+
+:root {
+    --bg-color: #f0f2f5;
+    --sidebar-bg: #ffffff;
+    --main-bg: #f7f7f8;
+    --border-color: #e5e7eb;
+    --text-color: #111827;
+    --text-secondary: #6b7280;
+    --primary-color: #4f46e5;
+    --primary-hover: #4338ca;
+    --input-bg: #f9fafb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-size: 14px;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.container { display: flex; width: 100%; height: 100%; }
+
+.sidebar {
+    width: 380px;
+    flex-shrink: 0;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+}
+
+.header { padding-bottom: 16px; margin-bottom: 24px; border-bottom: 1px solid var(--border-color); }
+.header h2 { margin: 0; }
+.header p { margin: 4px 0 0; color: var(--text-secondary); }
+
+.main-content { flex-grow: 1; background-color: var(--main-bg); padding: 24px; overflow-y: auto; }
+#result-panel { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+
+.form-group { margin-bottom: 16px; }
+label { display: block; font-weight: 500; margin-bottom: 8px; }
+
+input[type="password"], textarea, select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 14px;
+    background-color: var(--input-bg);
+    transition: border-color 0.2s;
+}
+textarea { resize: vertical; }
+input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+}
+
+.image-drop-zone {
+    border: 2px dashed var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    height: 150px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+    background-color: var(--input-bg);
+    transition: border-color 0.2s;
+}
+.image-drop-zone:hover { border-color: var(--primary-color); }
+#image-preview { max-width: 100%; max-height: 100%; object-fit: contain; }
+#upload-placeholder { color: var(--text-secondary); text-align: center; }
+#clear-image-btn {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    background: rgba(0,0,0,0.5);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    font-size: 16px;
+    line-height: 24px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.slider-group .slider-label { display: flex; justify-content: space-between; align-items: center; }
+.slider-group .slider-label span { font-weight: 600; color: var(--primary-color); }
+.slider-group small { display: block; margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+
+input[type="range"] { -webkit-appearance: none; width: 100%; height: 6px; background: #ddd; border-radius: 5px; outline: none; margin-top: 8px; }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; background: var(--primary-color); cursor: pointer; border-radius: 50%; }
+input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; background: var(--primary-color); cursor: pointer; border-radius: 50%; }
+
+#generate-btn {
+    width: 100%; padding: 12px; background-color: var(--primary-color); color: white; border: none;
+    border-radius: 6px; font-size: 16px; font-weight: 500; cursor: pointer; transition: background-color 0.2s;
+    display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: auto;
+}
+#generate-btn:hover { background-color: var(--primary-hover); }
+#generate-btn:disabled { background-color: #9ca3af; cursor: not-allowed; }
+
+.placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--text-secondary); }
+#image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(256px, 1fr)); gap: 16px; width: 100%; }
+.image-container { position: relative; overflow: hidden; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.image-container img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.hidden { display: none; }
+.spinner { border: 5px solid rgba(0, 0, 0, 0.1); width: 50px; height: 50px; border-radius: 50%; border-left-color: var(--primary-color); animation: spin 1s ease infinite; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+.error { color: #b91c1c; background-color: #fee2e2; border: 1px solid #fca5a5; padding: 15px; border-radius: 6px; text-align: center; max-width: 80%; }
+
+
+
